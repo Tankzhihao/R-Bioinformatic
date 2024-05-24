@@ -1,0 +1,105 @@
+rm(list = ls())
+library(tibble)
+library(dplyr)
+#查看CLL包中的数据结构
+library(CLL)
+data("sCLLex")
+exprSet = exprs(sCLLex)
+#通过GEOquery的getGEO函数获得GDS58的数据，该数据为表格形式
+library(GEOquery)
+gds58 <- getGEO("GDS58")
+#查看数据
+names(Meta(gds58))
+Table(gds58)[1:3,1:3]
+#获取GSE42872的数据，因为下载时只需要矩阵数据，故通过getGPL为F和AnnotGPL为F节约时间
+gse42872 <- getGEO("GSE42872", getGPL = F, AnnotGPL = F, destdir = "~/Desktop/Rwork/")
+gse_exptable <- read.table("~/Desktop/Rwork/GSE42872_series_matrix.txt.gz",
+           sep = "\t", comment.char = "!", header = T)
+str(gse_exptable)
+##其它芯片需要根据affymetrix或者illumina使用相应的包来获取
+str(gse42872)
+##查看对象gse42872的结构信息，发现是List of 1。一个GEO对应一个平台，说明该数据只包含一个平台的信息
+#将对象gse42872的表达矩阵表现出来，需要获取eSet对象，故选取的是gse42872[[1]]
+gse_exp = exprs(gse42872[[1]])
+#将rownames改为探针ID号
+rownames(gse_exptable) = gse_exptable[,1]
+rownames(gse_exptable)
+#去掉第一列更加美观
+gse_exptable = gse_exptable[,-1]
+#基因的探针ID需要转换，可以通过一些特定的包来进行，不同的矩阵数据需要找到不同的包
+#通过查看gse42872可以看到Annotation平台为GPL6244，然后去查找对应的转换包
+gse42872
+#BiocManager::install("hugene10sttranscriptcluster.db")
+library(hugene10sttranscriptcluster.db)
+#通过?hugene10sttranscriptcluster.db查询该平台包的用法
+ids = toTable(hugene10sttranscriptclusterSYMBOL)
+#unique去重，查询有多少SYMBOLID
+length(unique(ids$symbol))
+#查看有多少基因在probeid里, %in%用于判断前面向量中的元素是否在后面的向量中
+table(rownames(gse_exptable) %in% ids$probe_id)
+#过滤表达矩阵，留下存在于probeid里面的基因
+gse_exptable = gse_exptable[rownames(gse_exptable) %in% ids$probe_id,]
+#更改一下探针的SYMBOLID顺序，对齐表达矩阵的顺序
+ids = ids[match(rownames(gse_exptable), ids$probe_id),]
+#更改顺序后可以根据SYMBOLID对表达矩阵进行分类，根据每行的各个样品的表达量的平均值的最大值来分类(可以使用dim函数来查看过滤前后数量变化)
+splitted_table = by(gse_exptable, ids$symbol, function(x) rownames(x)[which.max(rowMeans(x))])
+gse_exptable = gse_exptable[rownames(gse_exptable) %in% as.character(splitted_table),]
+#将基因ID名和SYMBOLID对应
+ids_gse = ids[ids$probe_id %in% rownames(gse_exptable),]
+gse_exptable = rownames_to_column(gse_exptable)
+colnames(gse_exptable)[1] <- "probe_id"
+rownames(gse_exptable) <- gse_exptable$probe_id
+table(rownames(gse_exptable) %in% ids_gse$probe_id)
+type(gse_exptable[1,1])
+gse_exptable = left_join(ids_gse, gse_exptable, by = "probe_id")
+rownames(gse_exptable) = gse_exptable$probe_id
+gse_exptable = gse_exptable[,-1]
+gse_exptable[gse_exptable$symbol=="P53",]
+
+###了解表达矩阵
+library(hgu95av2.db)
+ids_CLL = toTable(hgu95av2SYMBOL)
+#首先查看有多少基因在probeid里
+table(rownames(exprSet) %in% ids_CLL$probe_id)
+#过滤表达矩阵，留下存在于probeid里面的基因
+exprSet = as.data.frame(exprSet[rownames(exprSet) %in% ids_CLL$probe_id,])
+#更改一下探针的SYMBOLID顺序，对齐表达矩阵的顺序
+ids_CLL = ids_CLL[match(rownames(exprSet), ids_CLL$probe_id),]
+##在多个探针对应一个基因的情况下，只保留平均表达量最高的那个探针
+length(which(is.na(exprSet)))
+#给ids表格添加一列各个基因平均表达量的列
+ids_CLL$median <- apply(exprSet, 1, median)
+#排序基因名和平均表达量
+ids_CLL <- ids_CLL[order(ids_CLL$symbol, ids_CLL$median, decreasing = T),]
+#通过duolicated函数传入symbol获得表达量更高的同基因名探针，然后用！保留所需探针
+ids_filtered_CLL = ids_CLL[!duplicated(ids_CLL$symbol),]
+#将基因名和SYMBOLID对应
+ids_gse_CLL = ids_CLL[ids_CLL$probe_id %in% rownames(exprSet),]
+exprSet$probe_id <- rownames(exprSet)
+table(rownames(exprSet) %in% ids_gse_CLL$probe_id)
+exprSet <- merge(ids_filtered_CLL, exprSet, by ='probe_id' )
+rownames(exprSet) <- exprSet$symbol
+exprSet = exprSet[,-1]
+#首先找到内参基因GAPDH，发现表达量比较高（也可以看ACTB这些表达量高的来检查）
+exprSet['ACTB',]
+boxplot(exprSet$CLL11.CEL)
+#其次看表达矩阵的一些分布图
+group = pData(sCLLex)
+library(reshape2)
+exprSet_L = melt(exprSet[,-2], id.vars = 'symbol', variable.name = 'sample')
+exprSet_L$group = rep(group$Disease, each = nrow(exprSet))
+library(ggplot2)
+#各个样本表达量的箱形图
+ggplot(exprSet_L, aes(x = sample, y = value, fill = group)) + geom_boxplot()
+expr_samp = exprSet[,-c(1,2)]
+#聚类分析图，当大部分progress/stable在一边的时候才合适于进行下面的分析
+#只要按照代码跑，差异分析肯定可以得到，但是没有一个很好的聚类跑差异分析没有意义
+colnames(expr_samp) <- paste0(as.character(group$Disease), 1:22, sep = '')
+t.exp = t(expr_samp)
+hc = hclust(dist(t.exp))
+plot(as.dendrogram(hc))
+#对样本进行PCA画图
+library(ggfortify)
+df <- as.data.frame(t.exp)
+df$group <- group$Disease
+autoplot(prcomp(df[,1:(ncol(df)-1)]), data=df, label = F, colour = 'group')
