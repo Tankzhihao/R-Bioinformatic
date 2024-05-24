@@ -1,0 +1,52 @@
+###表达矩阵探索进行下游分析
+rm(list = ls())
+library(BiocManager)
+library(corrplot)
+#corrpolt
+library(airway)
+data(airway)
+exprSet = assay(airway)
+corrplot(cor(log2(exprSet+1)))
+#heatmap
+library(pheatmap)
+heatmap(scale(cor(log2(exprSet+1))))
+#hclust
+grouplist = colData(airway)[,3]
+colnames(exprSet) = paste(grouplist, 1:ncol(exprSet), sep = '_')
+hc = hclust(dist(t(log2(exprSet+1))))
+plot(as.dendrogram(hc))
+#DEG
+exprSet = assay(airway)
+library(limma)
+library(DESeq2)
+library(edgeR)
+colData = data.frame(row.names = colnames(exprSet), grouplist = grouplist)
+##创建DES对象
+dds = DESeqDataSetFromMatrix(countData = exprSet,
+                             colData = colData,
+                             design = ~ grouplist)
+
+dds = DESeq(dds)
+##寻找差异基因
+#results是DESeq2包中提取DESeq分析结果的函数
+res = results(dds, contrast = c("grouplist", "trt", "untrt"))
+DEG = as.data.frame(res[order(res$padj),])
+#去除DEG中NA数据
+DEG = na.omit(DEG)
+#画个热图
+choose_gene = head(rownames(DEG), 50)
+choose_matrix = exprSet[choose_gene,]
+choose_matrix = t(scale(t(choose_matrix)))
+pheatmap(choose_matrix)
+#火山图
+library(ggplot2)
+logFC_cutoff = with(DEG, mean(abs(log2FoldChange)) + 2*sd(abs(log2FoldChange)))
+DEG$change = as.factor(ifelse(DEG$pvalue < 0.05 & 
+                                abs(DEG$log2FoldChange) > logFC_cutoff,
+                              ifelse(DEG$log2FoldChange > logFC_cutoff,
+                                     "UP", "DOWN"),"NOT"))
+ggplot(data = DEG, mapping = aes(x = log2FoldChange, y = -log10(pvalue), 
+                           color = change)) +
+       theme_set(theme_set(theme_bw(base_size = 20))) +
+           geom_point(alpha=0.4, size = 1.75) +
+           scale_color_manual(values = c("blue", "black", "red"))
