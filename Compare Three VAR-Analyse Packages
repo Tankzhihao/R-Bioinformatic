@@ -1,0 +1,52 @@
+rm(list = ls())
+library(tibble)
+des = read.delim("DESeq.txt")
+edg = read.delim("edgeR.txt")
+lim = read.delim("limma.txt")
+
+up_down = data.frame(deseq2 = as.integer(table(des$change)),
+                     edgeR = as.integer(table(edg$change)),
+                     limma = as.integer(table(lim$change)),
+                     row.names = c("DOWN", "NOT", "UP"))
+
+up = function(df){rownames(df)[df$change == "UP"]}
+down = function(df){rownames(df)[df$change == "DOWN"]}
+
+#Get the intersect of three methods
+#The intersect() can only get two arguments, for three sets should be twice used
+up_intersect = intersect(intersect(up(des), up(edg)), up(lim))
+down_intersect = intersect(intersect(down(des), down(edg)), down(lim))
+
+#Plot venn diagram
+library(ggplot2)
+library(ggVennDiagram)
+
+Venn_data = list(DESeq = up(des), edgeR = up(edg), limma = up(lim))
+ggVennDiagram(Venn_data)
+
+#PCA plot
+C_table = read.delim("HNSC_Count_Matrix_processed.txt", sep = "\t",
+                     header = T, check.names = F)
+rownames(C_table) = C_table[,1]
+C_table = C_table[-1]
+group = factor(ifelse(as.integer(substr(colnames(C_table), 14, 15)) < 10, 
+                      "Tumor", "Normal"), levels = c("Tumor", "Normal"))
+#Plot matrix
+library(edgeR)
+data_m = log2(cpm(C_table) + 1)
+data_m = as.data.frame(t(data_m))
+library(FactoMineR)
+library(factoextra)
+data_pca = PCA(data_m, graph = F)
+pca_plot = fviz_pca_ind(data_pca, geom.ind = "point", col.ind = group,
+                        palette = c("darkgreen", "yellow"),
+                        addEllipses = T, legend.title = "Groups")
+pca_plot
+
+#Pheatmap
+library(pheatmap)
+heat = C_table[c(up_intersect, down_intersect),]
+annocol = data.frame(group = group)
+rownames(annocol) = colnames(C_table)
+heatmap = pheatmap(heat, show_rownames = F, show_colnames = F,
+                   scale = "row", cluster_cols = F, annotation_col = annocol)
