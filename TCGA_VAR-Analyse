@@ -1,0 +1,207 @@
+rm(list = ls())
+library(limma)
+
+Count_M = read.delim("HNSC_Count_Matrix.txt", sep = "\t", 
+                     header = T, check.names = F)
+##Data process
+Count_M = as.matrix(Count_M)
+rownames(Count_M) = Count_M[,1]
+exp = Count_M[,2:ncol(Count_M)]
+dimnames = list(rownames(exp), colnames(exp))
+C_data = matrix(as.numeric(as.matrix(exp)), 
+                nrow = nrow(exp), dimnames = dimnames)
+#When duplicate gene names come, calculate the average expression data
+C_data = avereps(C_data)
+?avereps
+#Filter the gene with low expression
+C_data = C_data[rowMeans(C_data) > 1,]
+output = rbind(colnames(C_data), C_data)
+
+write.table(output, file = "HNSC_Count_Matrix_processed.txt", sep = "\t",
+            quote = F, col.names = F)
+
+###Differential analyse
+C_table = read.delim("HNSC_Count_Matrix_processed.txt", header = T, sep = "\t", 
+           check.names = F)
+rownames(C_table) = C_table[,1]
+C_table = C_table[,-1]
+#Because the input data must be integer, use the function round()
+C_table = round(C_table, 0)
+#With the function substr() to group the samples
+group = factor(ifelse(as.integer(substr(colnames(C_table), 14, 15)) < 10, 
+                      "Tumor", "Normal"), levels = c("Tumor", "Normal"))
+#See how many tumor sample and normal sample
+table(group)
+
+##Through edgeR package
+library(edgeR)
+#ensure the cutoff
+logFC_cutoff = 1
+padj = 0.05
+
+#Contrast matrix
+contr_m = DGEList(counts = C_table, group = group)
+contr_m$samples$lib.size = colSums(contr_m$counts)
+#Calculate normalizing factor
+contr_m = calcNormFactors(contr_m)
+#Design matrix
+des_m = model.matrix(~0 + factor(group))
+colnames(des_m) = c("Normal", "Tumor")
+rownames(des_m) = colnames(contr_m)
+#colnames(des_m) = levels(group)
+
+#Estimate the dispersion
+contr_m = estimateGLMCommonDisp(contr_m, des_m)
+contr_m = estimateGLMTrendedDisp(contr_m, des_m)
+contr_m = estimateGLMTagwiseDisp(contr_m, des_m)
+fit = glmFit(contr_m, des_m)
+fit1 = glmLRT(fit, contrast = c(-1, 1))
+
+#Correct the p-value
+Contr_m = topTags(fit1, n = nrow(C_table))
+Contr_m = as.data.frame(Contr_m)
+
+#Select the gene with significant difference
+#FDR means the corrected p-value
+Contr_m_sig = Contr_m[(Contr_m$FDR < 0.05) & (abs(Contr_m$logFC) > 1),]
+write.table(Contr_m_sig, file = "HNSC_Count_Matrix_significant.txt",
+            sep = "\t", quote = F)
+#Obtain the up- and downregulation gene
+upregulation = Contr_m[(Contr_m$FDR < 0.05) & ((Contr_m$logFC) > 1),]
+downregulation = Contr_m[(Contr_m$FDR < 0.05) & ((Contr_m$logFC) < -1),]
+Contr_m$change = factor(ifelse((Contr_m$FDR < 0.05) & (abs(Contr_m$logFC) > 1),
+                               ifelse((Contr_m$FDR < 0.05) & ((Contr_m$logFC) > 1), 
+                                      "UP", "DOWN"),"NOT"))
+write.table(Contr_m, file = "edgeR.txt", sep = "\t", quote = F)
+
+##visualization
+library(ggplot2)
+library(tibble)
+#volcano plot
+gg_edge = ggplot(Contr_m, aes(logFC, -log10(as.numeric(FDR)), color = change))
+gg_edge + geom_point() + labs(y = "-log10 FDR") + 
+  geom_vline(xintercept = c(-1, 1), lty = 2, color = "black") +
+  geom_hline(yintercept = -log10(0.05), lty = 2, color = "black") +
+  xlim(-10, 10) + ylim(-10, 10)
+
+#heatmap
+library(pheatmap)
+set.seed(2500)
+#extract 100 sample to plot
+hm_df = C_table[sample(1:nrow(C_table), 100),]
+pheatmap(hm_df, show_rownames = T, show_colnames = T, fontsize = 1,
+         color = colorRampPalette(c("blue", "white", "red"))(50),
+         border_color = NA, scale = "row", cluster_rows = T, cluster_cols = T)
+
+#plot heatmap with ggplot2
+gg_hm = read.delim("HNSC_Count_Matrix_processed.txt", sep = "\t",
+                   header = T, check.names = F)
+set.seed(100)
+gg_hm = gg_hm[sample(1:nrow(C_table), 44),]
+names(gg_hm)[1] = "ID"
+rownames(gg_hm) = NULL
+gg_hm = column_to_rownames(gg_hm, var = "ID")
+
+#Normalize the data
+library(dplyr)
+gg_hm_nor = scale(gg_hm) %>% as.data.frame()
+#Data must not include row names when use ggplot2
+rownames(gg_hm_nor) = NULL
+df1 = data.frame(rownames(gg_hm), gg_hm_nor)
+names(df1)[1] = "ID"
+
+#When use ggplot2 plotting, the data type should be long data
+library(reshape)
+#Taking ID as main factor
+df.melt = melt(df1, id.vars = c("ID"))
+ggplot(df.melt, aes(x = variable, y = ID)) + geom_tile(aes(fill = value)) +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0)
+
+##Through DESeq2
+library(DESeq2)
+C_M_DES = C_table
+group_data = data.frame(group)
+#Establish the DES matrix
+DES_M = DESeqDataSetFromMatrix(countData = C_M_DES,
+                               colData = group_data, design = ~group)
+
+#Cluster result
+library(factoextra)
+#Ignore the group information, transforming without variance
+vsd = vst(DES_M)
+#calculate the distance
+distance = dist(t(assay(vsd)))
+#group the cluster tree. There are "Normal" and "Tumor" groups, k=2
+tree = hcut(distance, k = 2, stand = F, hc_method = "average")
+fviz_dend(tree, rect_fill = T, cex = 0.5, color_labels_by_k = T, horiz = T)
+
+#Principal Component Analysis
+vsd_PCA = vst(DES_M, blind = F)
+plotPCA(vsd_PCA, intgroup = "group")
+
+#Standardization of DES Matrix
+DES_S = DESeq(DES_M)
+#Two-group comparison, contrast = c("condition", "treated", "untreated")
+#because the levels(group) is "Tumor“ and "Normal", we need rev()
+T_Comp = results(DES_S, contrast = c("group", rev(levels(group))))
+T_Comp = T_Comp[order(T_Comp$padj),] %>% as.data.frame() %>% na.omit()
+T_Comp$change = factor(ifelse((T_Comp$pvalue < 0.05) & 
+                                (abs(T_Comp$log2FoldChange) > 1),
+                              ifelse((T_Comp$pvalue < 0.05) & 
+                                       ((T_Comp$log2FoldChange) > 1), 
+                                     "UP", "DOWN"),"NOT"))
+write.table(T_Comp, file = "DESeq.txt", sep = "\t", quote = F)
+#Volcano plot
+gg_DES = ggplot(T_Comp, aes(log2FoldChange, -log10(as.numeric(padj))
+                            , color = change))
+gg_DES + geom_point() + labs(y = "-log10 padj") + 
+  geom_vline(xintercept = c(-1, 1), lty = 2, color = "black") +
+  geom_hline(yintercept = -log10(0.05), lty = 2, color = "black") +
+  xlim(-10, 10) + ylim(-10, 10)
+#pheatmap
+dfNor = scale()
+set.seed(2500)
+hm_df_DES = C_M_DES[sample(1:nrow(C_M_DES), 40),]
+pheatmap(hm_df_DES, show_rownames = T, show_colnames = T, fontsize = 1,
+         color = colorRampPalette(c("blue", "white", "red"))(50),
+         border_color = NA, scale = "row", cluster_rows = T, cluster_cols = T)
+
+##Through limma
+C_M_lim = C_table
+#Take the group list as a model matrix
+model_m = model.matrix(~0 + factor(group))
+colnames(model_m) = c("Normal", "Tumor")
+rownames(model_m) = colnames(C_M_lim)
+#When using limma package, the DEGList should be established
+DGE_lim = DGEList(counts = C_M_lim, group = group)
+#Calculate the normalized factors
+DGE_lim = calcNormFactors(DGE_lim)
+#Transform the count to logCPM for linear regression
+DGE_tran = voom(DGE_lim, model_m, plot = T, normalize = "quantile")
+#linear model establish
+DGE_fit = lmFit(DGE_tran, model_m)
+#Contrast matrix
+Contr_m_lim = makeContrasts(contrasts = c("Tumor-Normal"), levels = model_m)
+#Establish linear model and calculate correlation and standard diff
+DGE_fit1 = contrasts.fit(DGE_fit, Contr_m_lim)
+DGE_fit1 = eBayes(DGE_fit1)
+output_lim = topTable(DGE_fit1, n = Inf, adjust = "fdr") %>% na.omit()
+output_lim$change = factor(ifelse((output_lim$adj.P.Val < 0.05) & 
+                                    (abs(output_lim$logFC) > 1),
+                                  ifelse((output_lim$adj.P.Val < 0.05) & 
+                                           ((output_lim$logFC) > 1), 
+                                         "UP", "DOWN"),"NOT"))
+write.table(output_lim, file = "limma.txt", sep = "\t", quote = F)
+
+gg_lim = ggplot(output_lim, aes(logFC, -log10(as.numeric(adj.P.Val))
+                            , color = change))
+gg_DES + geom_point() + labs(y = "-log10 adj.P.Val") + 
+  geom_vline(xintercept = c(-1, 1), lty = 2, color = "black") +
+  geom_hline(yintercept = -log10(0.05), lty = 2, color = "black") +
+  xlim(-10, 10) + ylim(-10, 10)
+#pheatmap
+set.seed(2500)
+hm_df_lim = C_M_lim[sample(1:nrow(C_M_lim), 40),]
+pheatmap(hm_df_lim, show_rownames = T, show_colnames = T, fontsize = 1,
+         color = colorRampPalette(c("blue", "white", "red"))(50),
+         border_color = NA, scale = "row", cluster_rows = T, cluster_cols = T)
