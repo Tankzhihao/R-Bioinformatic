@@ -1,0 +1,421 @@
+rm(list = ls())
+##Clinical data
+library(TCGAbiolinks)
+library(dplyr)
+getProjectSummary("TCGA-HNSC")
+#indexed clinical data(if needed)
+#clinical_index = GDCquery_clinic(project = "TCGA-HNSC", type = "clinical")
+#complete clinical data
+clinical_data_q = GDCquery(project = "TCGA-HNSC", data.category = "Clinical",
+                         data.type = "Clinical Supplement", 
+                         data.format = "BCR XML")
+GDCdownload(query = clinical_data_q, method = "api", files.per.chunk = 3)
+
+#basical patient information
+clinical_patient = GDCprepare_clinic(clinical_data_q, clinical.info = "patient")
+clinical_info = c("patient", "drug", "follow_up", "radiation", "stage_event", 
+                  "new_tumor_event", "admin")
+for (i in clinical_info){
+  clini_data = GDCprepare_clinic(clinical_data_q, clinical.info = i)
+  write.table(clini_data, file = paste0("TCGA-HNSC_clinical_", i, ".txt"),
+              sep = "\t", row.names = F)
+}
+
+#patient information
+patient_info = clinical_patient[,c(1, 7, 9, 11, 12, 13, 48)] %>%
+  distinct(bcr_patient_barcode, .keep_all = T)
+#Follow-up
+clinical_follow = GDCprepare_clinic(clinical_data_q, 
+                                    clinical.info = "follow_up")
+cli = clinical_follow %>% select(bcr_patient_barcode, vital_status,
+                                 postoperative_rx_tx, radiation_therapy, 
+                                 new_tumor_event_after_initial_treatment,
+                                 days_to_death, days_to_last_followup)
+table(cli$vital_status)
+library(DT)
+dead = cli %>% filter(vital_status == "Dead") %>% 
+  select(-days_to_last_followup) %>% 
+  rename("Days" = days_to_death) %>%
+  mutate(vital_status = ifelse(vital_status == "Dead", 1, 0))
+alive = cli %>% filter(vital_status == "Alive") %>%
+  select(-days_to_death) %>%
+  rename("Days" = days_to_last_followup) %>%
+  mutate(vital_status = ifelse(vital_status == "Dead", 1, 0))
+survival_data = rbind(dead, alive)
+write.table(survival_data, "HNSC-survival_data_follow_up.txt", sep = "\t", 
+            row.names = F)
+stage_event = GDCprepare_clinic(clinical_data_q,
+                          clinical.info = "stage_event")[,c(1,5)]
+drug = GDCprepare_clinic(clinical_data_q, clinical.info = "drug")
+tnm = GDCquery_clinic(project = "TCGA-HNSC", 
+                      type = "clinical")[,c(2, 4, 20, 24, 23)]
+names(tnm)[1] = "bcr_patient_barcode"
+survival_analysis = merge(survival_data, patient_info, 
+                          by = "bcr_patient_barcode")
+survival_analysis = merge(survival_analysis, tnm, 
+                          by = "bcr_patient_barcode")
+survival_analysis = merge(survival_analysis, stage_event, 
+                          by = "bcr_patient_barcode")
+write.table(survival_analysis, file = "HNSC_Survival_analysis.txt", 
+            sep = "\t", row.names = F)
+
+exp = read.delim("HNSC_Survival_analysis_selected.txt")
+names(exp)
+table(exp$vital_status)
+exp$Age = round(-exp$Age / 365, 0)
+colname = colnames(exp)[-c(1, 2, 6, 8, 9, 10, 17, 18)]
+for (i in colname) {
+  exp[,i] = as.factor(exp[,i])
+}
+#Group the sample
+library(caret)
+set.seed(100)
+#Select 70% data as train data
+#sample_index = createDataPartition(exp$bcr_patient_barcode, p = 0.7, list = F)
+index = sample(1:nrow(exp), round(nrow(exp)*0.7))
+train_data = exp[index,]
+test_data = exp[-index,]
+
+#Single factor cox Regression
+names(train_data)
+td_colnames = colnames(train_data)[-c(1, 2, 6, 8, 9, 10, 17, 18)]
+for (i in td_colnames) {
+  train_data[,i] = as.factor(train_data[,i])
+}
+library(survival)
+fit1 = coxph(Surv(Days, vital_status)~gender, 
+             data = train_data)
+summary(fit1)
+
+fit2 = coxph(Surv(Days, vital_status)~radiation_therapy, 
+             data = train_data)
+summary(fit2)#
+
+fit3 = coxph(Surv(Days, vital_status)~postoperative_rx_tx, 
+             data = train_data)
+summary(fit3)
+
+fit4 = coxph(Surv(Days, vital_status)~new_tumor_event_after_initial_treatment, 
+             data = train_data)
+summary(fit4)#
+
+fit5 = coxph(Surv(Days, vital_status)~ajcc_pathologic_stage, 
+             data = train_data)
+summary(fit5) #IVB
+
+fit6 = coxph(Surv(Days, vital_status)~tobacco_smoking_history, 
+             data = train_data)
+summary(fit6)
+
+fit7 = coxph(Surv(Days, vital_status)~race_list, 
+             data = train_data)
+summary(fit7)
+
+#Multi COX Regression model
+y = Surv(train_data$Days, train_data$vital_status)
+fit = coxph(y~radiation_therapy + new_tumor_event_after_initial_treatment + 
+            ajcc_pathologic_stage, data = train_data)
+summary(fit)
+
+#All factors
+fit_all = coxph(y~gender + radiation_therapy + 
+                  postoperative_rx_tx + 
+                  new_tumor_event_after_initial_treatment + 
+                  ajcc_pathologic_stage + race_list + tobacco_smoking_history, 
+                  data = train_data)
+summary(fit_all)
+#stepwise regression
+step(fit_all, direction = "both")
+
+library(rms)
+train_data_n = train_data[,c(2, 4, 5, 6, 8, 13)]
+#Pack the data
+dd = datadist(train_data_n)
+options(datadist = "dd")
+
+#Multi factors regression model
+fit_multi = cph(Surv(Days, vital_status)~radiation_therapy + 
+                  new_tumor_event_after_initial_treatment + 
+                  Age + ajcc_pathologic_stage, 
+                x = T, y = T, surv = T, data = train_data_n)
+fit_multi
+
+surv = Survival(fit_multi)
+surv1 = function(x)surv(1*365,lp=x)
+surv3 = function(x)surv(3*365,lp=x)
+surv5 = function(x)surv(5*365,lp=x)
+nomo1 = nomogram(fit_multi, fun = list(surv1, surv3, surv5), lp = F,
+                 maxscale = 100, funlabel = c("1-Year", "3-Year", "5-Year"),
+                 fun.at = c("0.9", "0.85", "0.8", "0.7", "0.6", "0.5", "0.4", 
+                            "0.3", "0.2", "0.1", "0"))rm(list = ls())
+##Clinical data
+library(TCGAbiolinks)
+library(dplyr)
+getProjectSummary("TCGA-HNSC")
+#indexed clinical data(if needed)
+#clinical_index = GDCquery_clinic(project = "TCGA-HNSC", type = "clinical")
+#complete clinical data
+clinical_data_q = GDCquery(project = "TCGA-HNSC", data.category = "Clinical",
+                         data.type = "Clinical Supplement", 
+                         data.format = "BCR XML")
+GDCdownload(query = clinical_data_q, method = "api", files.per.chunk = 3)
+
+#basical patient information
+clinical_patient = GDCprepare_clinic(clinical_data_q, clinical.info = "patient")
+clinical_info = c("patient", "drug", "follow_up", "radiation", "stage_event", 
+                  "new_tumor_event", "admin")
+for (i in clinical_info){
+  clini_data = GDCprepare_clinic(clinical_data_q, clinical.info = i)
+  write.table(clini_data, file = paste0("TCGA-HNSC_clinical_", i, ".txt"),
+              sep = "\t", row.names = F)
+}
+
+#patient information
+patient_info = clinical_patient[,c(1, 7, 9, 11, 12, 13, 48)] %>%
+  distinct(bcr_patient_barcode, .keep_all = T)
+#Follow-up
+clinical_follow = GDCprepare_clinic(clinical_data_q, 
+                                    clinical.info = "follow_up")
+cli = clinical_follow %>% select(bcr_patient_barcode, vital_status,
+                                 postoperative_rx_tx, radiation_therapy, 
+                                 new_tumor_event_after_initial_treatment,
+                                 days_to_death, days_to_last_followup)
+table(cli$vital_status)
+library(DT)
+dead = cli %>% filter(vital_status == "Dead") %>% 
+  select(-days_to_last_followup) %>% 
+  rename("Days" = days_to_death) %>%
+  mutate(vital_status = ifelse(vital_status == "Dead", 1, 0))
+alive = cli %>% filter(vital_status == "Alive") %>%
+  select(-days_to_death) %>%
+  rename("Days" = days_to_last_followup) %>%
+  mutate(vital_status = ifelse(vital_status == "Dead", 1, 0))
+survival_data = rbind(dead, alive)
+write.table(survival_data, "HNSC-survival_data_follow_up.txt", sep = "\t", 
+            row.names = F)
+stage_event = GDCprepare_clinic(clinical_data_q,
+                          clinical.info = "stage_event")[,c(1,5)]
+drug = GDCprepare_clinic(clinical_data_q, clinical.info = "drug")
+tnm = GDCquery_clinic(project = "TCGA-HNSC", 
+                      type = "clinical")[,c(2, 4, 20, 24, 23)]
+names(tnm)[1] = "bcr_patient_barcode"
+survival_analysis = merge(survival_data, patient_info, 
+                          by = "bcr_patient_barcode")
+survival_analysis = merge(survival_analysis, tnm, 
+                          by = "bcr_patient_barcode")
+survival_analysis = merge(survival_analysis, stage_event, 
+                          by = "bcr_patient_barcode")
+write.table(survival_analysis, file = "HNSC_Survival_analysis.txt", 
+            sep = "\t", row.names = F)
+
+exp = read.delim("HNSC_Survival_analysis_selected.txt")
+names(exp)
+table(exp$vital_status)
+exp$Age = round(-exp$Age / 365, 0)
+colname = colnames(exp)[-c(1, 2, 6, 8, 9, 10, 17, 18)]
+for (i in colname) {
+  exp[,i] = as.factor(exp[,i])
+}
+#Group the sample
+library(caret)
+set.seed(100)
+#Select 70% data as train data
+#sample_index = createDataPartition(exp$bcr_patient_barcode, p = 0.7, list = F)
+index = sample(1:nrow(exp), round(nrow(exp)*0.7))
+train_data = exp[index,]
+test_data = exp[-index,]
+
+#Single factor cox Regression
+names(train_data)
+td_colnames = colnames(train_data)[-c(1, 2, 6, 8, 9, 10, 17, 18)]
+for (i in td_colnames) {
+  train_data[,i] = as.factor(train_data[,i])
+}
+library(survival)
+fit1 = coxph(Surv(Days, vital_status)~gender, 
+             data = train_data)
+summary(fit1)
+
+fit2 = coxph(Surv(Days, vital_status)~radiation_therapy, 
+             data = train_data)
+summary(fit2)#
+
+fit3 = coxph(Surv(Days, vital_status)~postoperative_rx_tx, 
+             data = train_data)
+summary(fit3)
+
+fit4 = coxph(Surv(Days, vital_status)~new_tumor_event_after_initial_treatment, 
+             data = train_data)
+summary(fit4)#
+
+fit5 = coxph(Surv(Days, vital_status)~ajcc_pathologic_stage, 
+             data = train_data)
+summary(fit5) #IVB
+
+fit6 = coxph(Surv(Days, vital_status)~tobacco_smoking_history, 
+             data = train_data)
+summary(fit6)
+
+fit7 = coxph(Surv(Days, vital_status)~race_list, 
+             data = train_data)
+summary(fit7)
+
+#Multi COX Regression model
+y = Surv(train_data$Days, train_data$vital_status)
+fit = coxph(y~radiation_therapy + new_tumor_event_after_initial_treatment + 
+            ajcc_pathologic_stage, data = train_data)
+summary(fit)
+
+#All factors
+fit_all = coxph(y~gender + radiation_therapy + 
+                  postoperative_rx_tx + 
+                  new_tumor_event_after_initial_treatment + 
+                  ajcc_pathologic_stage + race_list + tobacco_smoking_history, 
+                  data = train_data)
+summary(fit_all)
+#stepwise regression
+step(fit_all, direction = "both")
+
+library(rms)
+train_data_n = train_data[,c(2, 4, 5, 6, 8, 13)]
+#Pack the data
+dd = datadist(train_data_n)
+options(datadist = "dd")
+
+#Multi factors regression model
+fit_multi = cph(Surv(Days, vital_status)~radiation_therapy + 
+                  new_tumor_event_after_initial_treatment + 
+                  Age + ajcc_pathologic_stage, 
+                x = T, y = T, surv = T, data = train_data_n)
+fit_multi
+
+surv = Survival(fit_multi)
+surv1 = function(x)surv(1*365,lp=x)
+surv3 = function(x)surv(3*365,lp=x)
+surv5 = function(x)surv(5*365,lp=x)
+nomo1 = nomogram(fit_multi, fun = list(surv1, surv3, surv5), lp = F,
+                 maxscale = 100, funlabel = c("1-Year", "3-Year", "5-Year"),
+                 fun.at = c("0.9", "0.85", "0.8", "0.7", "0.6", "0.5", "0.4", 
+                            "0.3", "0.2", "0.1", "0"))
+# xfrac means the distance between characters and lines
+plot(nomo1, xfrac = 0.6)
+# show the result of nomogram (not plotting)
+nomo1
+
+#Calibration curve
+fit_ca1 = cph(Surv(Days, vital_status)~radiation_therapy + 
+                new_tumor_event_after_initial_treatment + 
+                Age + ajcc_pathologic_stage, time.inc = 1 * 365, 
+              x = T, y = T, surv = T, data = train_data_n)
+calibration1 = calibrate(fit_ca1, cmethod = "KM", method = "boot", 
+                         u = 1 * 365, m = 90, B = 1000)
+plot(calibration1)
+
+fit_ca3 = cph(Surv(Days, vital_status)~radiation_therapy + 
+                new_tumor_event_after_initial_treatment + 
+                Age + ajcc_pathologic_stage, time.inc = 3 * 365, 
+              x = T, y = T, surv = T, data = train_data_n)
+calibration2 = calibrate(fit_ca3, cmethod = "KM", method = "boot", 
+                         u = 3 * 365, m = 90, B = 1000)
+plot(calibration2)
+
+#Riskscore
+fit_multicox = coxph(Surv(Days, vital_status)~radiation_therapy + 
+                       new_tumor_event_after_initial_treatment + 
+                       Age + ajcc_pathologic_stage, data = train_data_n)
+train_data_n$riskscore = predict(fit_multicox, type = "risk", 
+                                 newdata = train_data_n)
+train_data_n$level = factor(ifelse(train_data_n$riskscore > 
+                                     median(train_data_n$riskscore),
+                                   "HIGH", "LOW"))
+
+#time ROC
+library(timeROC)
+ROC = timeROC(T = train_data_n$Days, delta = train_data_n$vital_status,
+              marker = train_data_n$riskscore, cause = 1,
+              weighting = "marginal", times = c(1*365, 3*365, 5*365), ROC = T)
+ROC
+
+plot(ROC, time = 1*365, col = "red", lwd = 2)
+plot(ROC, time = 3*365, col = "blue", lwd = 2, add = T)
+plot(ROC, time = 5*365, col = "green", lwd = 2, add = T)
+abline(0, 1)
+
+#survival ROC
+library(survivalROC)
+ROC_sur = survivalROC(train_data_n$Days, train_data_n$vital_status, 
+                      marker = train_data_n$riskscore, predict.time = 1*365,
+                      method = "KM")
+plot(ROC_sur$FP, ROC_sur$TP, type = "l")
+abline(0, 1)
+
+#Validate the model
+test_data_v = test_data[,c(2, 4, 5, 6, 8, 13)]
+names(test_data_v)
+fit_va = cph(Surv(Days, vital_status)~radiation_therapy + 
+               new_tumor_event_after_initial_treatment + 
+               Age + ajcc_pathologic_stage, 
+             x = T, y = T, surv = T, data = test_data_v)
+summary(fit_va)
+?fread
+
+# xfrac means the distance between characters and lines
+plot(nomo1, xfrac = 0.6)
+# show the result of nomogram (not plotting)
+nomo1
+
+#Calibration curve
+fit_ca1 = cph(Surv(Days, vital_status)~radiation_therapy + 
+                new_tumor_event_after_initial_treatment + 
+                Age + ajcc_pathologic_stage, time.inc = 1 * 365, 
+              x = T, y = T, surv = T, data = train_data_n)
+calibration1 = calibrate(fit_ca1, cmethod = "KM", method = "boot", 
+                         u = 1 * 365, m = 90, B = 1000)
+plot(calibration1)
+
+fit_ca3 = cph(Surv(Days, vital_status)~radiation_therapy + 
+                new_tumor_event_after_initial_treatment + 
+                Age + ajcc_pathologic_stage, time.inc = 3 * 365, 
+              x = T, y = T, surv = T, data = train_data_n)
+calibration2 = calibrate(fit_ca3, cmethod = "KM", method = "boot", 
+                         u = 3 * 365, m = 90, B = 1000)
+plot(calibration2)
+
+#Riskscore
+fit_multicox = coxph(Surv(Days, vital_status)~radiation_therapy + 
+                       new_tumor_event_after_initial_treatment + 
+                       Age + ajcc_pathologic_stage, data = train_data_n)
+train_data_n$riskscore = predict(fit_multicox, type = "risk", 
+                                 newdata = train_data_n)
+train_data_n$level = factor(ifelse(train_data_n$riskscore > 
+                                     median(train_data_n$riskscore),
+                                   "HIGH", "LOW"))
+
+#time ROC
+library(timeROC)
+ROC = timeROC(T = train_data_n$Days, delta = train_data_n$vital_status,
+              marker = train_data_n$riskscore, cause = 1,
+              weighting = "marginal", times = c(1*365, 3*365, 5*365), ROC = T)
+ROC
+
+plot(ROC, time = 1*365, col = "red", lwd = 2)
+plot(ROC, time = 3*365, col = "blue", lwd = 2, add = T)
+plot(ROC, time = 5*365, col = "green", lwd = 2, add = T)
+abline(0, 1)
+
+#survival ROC
+library(survivalROC)
+ROC_sur = survivalROC(train_data_n$Days, train_data_n$vital_status, 
+                      marker = train_data_n$riskscore, predict.time = 1*365,
+                      method = "KM")
+plot(ROC_sur$FP, ROC_sur$TP, type = "l")
+abline(0, 1)
+
+#Validate the model
+test_data_v = test_data[,c(2, 4, 5, 6, 8, 13)]
+names(test_data_v)
+fit_va = cph(Surv(Days, vital_status)~radiation_therapy + 
+               new_tumor_event_after_initial_treatment + 
+               Age + ajcc_pathologic_stage, 
+             x = T, y = T, surv = T, data = test_data_v)
+summary(fit_va)
