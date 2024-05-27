@@ -2,7 +2,7 @@
 rm(list = ls())
 library(BiocManager)
 library(corrplot)
-#corrpolt
+#corrpolt是一个绘制相关矩阵和置信区间的包
 library(airway)
 data(airway)
 exprSet = assay(airway)
